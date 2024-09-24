@@ -1,29 +1,60 @@
 name: "Release"
 
 on:
-  release:
-    types:
-      - "published"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions: {}
 
 jobs:
   release:
-    name: "Release"
+    name: "Create Release"
     runs-on: "ubuntu-latest"
-    permissions:
-      contents: write
     steps:
       - name: "Checkout the repository"
         uses: "actions/checkout@v4.1.7"
 
-      - name: "ZIP the integration directory"
-        shell: "bash"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+      - name: Get latest tag or fail
+        id: get-latest-tag
         run: |
-          cd "${{ github.workspace }}/custom_components/integration_blueprint"
-          zip integration_blueprint.zip -r ./
-
-      - name: "Upload the ZIP file to the release"
-        uses: "softprops/action-gh-release@v2.0.8"
+          latest_tag=$( git for-each-ref --sort=creatordate --format '%(refname)' refs/tags/ | tail -1 | sed 's/^.*v//')
+          if [ -z "$latest_tag" ]; then
+            echo "No tags found for the commit."
+            exit 1
+          fi
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+      - name: Get current version
+        id: get-version
+        run: echo ::set-output name=version::$(node -pe "require('./package.json').version")
+      - name: Install semver
+        run: npm install semver
+      - name: Check if version is higher
+        id: check-version
+        run: |
+          is_higher=$(node -pe "const semver = require('semver'); semver.gt('${{ steps.get-version.outputs.version }}', '${{ steps.get-latest-tag.outputs.tag }}')")
+          if [ -z "$is_higher" ]; then
+            echo "The version is not higher than the latest release"
+            exit 1
+          fi
+          echo "is_higher=$is_higher" >> $GITHUB_OUTPUT
+      - name: Build project
+        if: steps.check-version.outputs.is_higher == 'true'
+        run: |
+          yarn install
+          yarn run build
+      - name: 🛎️ Create release
+        if: steps.check-version.outputs.is_higher == 'true'
+        uses: softprops/action-gh-release@v2
         with:
-          files: ${{ github.workspace }}/custom_components/integration_blueprint/integration_blueprint.zip
+          files: dist/energy_db.js
+          tag_name: v${{ steps.get-version.outputs.version }}
+          name: v${{ steps.get-version.outputs.version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+      - name: 🏷️ Update latest tag
+        if: steps.check-version.outputs.is_higher == 'true'
+        uses: EndBug/latest-tag@latest
